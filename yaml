@@ -1,0 +1,289 @@
+esphome:
+  name: mcz-maggie
+  friendly_name: MCZ Maggie
+  on_boot:
+    - priority: -100
+      then:
+        - delay: 3s
+        - select.set:
+            id: mode_ventilation
+            option: "Auto"
+
+esp8266:
+  board: d1_mini
+  framework:
+    version: recommended
+
+
+# Augmente le niveau de logs
+logger:
+  level: VERBOSE
+  logs:
+    micronova: VERBOSE
+    uart: VERBOSE
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "="
+
+ota:
+  - platform: esphome
+    password: ""
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Mcz Fallback Hotspot"
+    password: ""
+
+captive_portal:
+
+
+external_components:
+  - source: github://Jorre05/micronova
+    components: [ micronova ]
+
+# --- CONFIGURATION SÉRIE
+uart:
+  tx_pin: D4
+  rx_pin: D1
+  baud_rate: 1200
+  stop_bits: 2
+
+micronova:
+  enable_rx_pin:
+    number: D2
+    inverted: false
+
+
+# --- CAPTEURS ---
+sensor:
+  - platform: micronova
+    fan_speed:
+      fan_rpm_offset: 240
+      name: Fan RPM
+
+  - platform: micronova
+    memory_address_sensor:
+      name: "Température"
+      memory_location: 0x00
+      memory_address: 0x01
+      accuracy_decimals: 1
+      unit_of_measurement: "°C"
+      filters:
+        - multiply: 0.5
+
+  - platform: micronova
+    memory_address_sensor:
+      name: "Puissance"
+      memory_location: 0x00
+      memory_address: 0x8B
+      icon: "mdi:fire"
+
+
+  - platform: micronova
+    memory_address_sensor:
+      name: "Température Fumées"
+      memory_location: 0x00
+      memory_address: 0x3E 
+      accuracy_decimals: 0
+      unit_of_measurement: "°C"
+
+  - platform: micronova
+    memory_address_sensor:
+      name: "Eco stop value"
+      id: raw_eco_stop_status
+      internal: true
+      memory_location: 0x00
+      memory_address: 0x20
+      accuracy_decimals: 0
+
+  # Lecture puissance consigne
+  - platform: micronova
+    memory_address_sensor:
+      name: "Puissance Consigne Lecture"
+      id: puissance_consigne_lecture
+      memory_location: 0x20  # LECTURE = 0x20
+      memory_address: 0x7E
+      accuracy_decimals: 0
+      internal: true  # Caché
+
+# --- CAPTEUR BINAIRE ---
+binary_sensor:
+  - platform: template
+    name: "Statut Eco Stop"
+    id: binary_eco_stop
+    lambda: |-
+      return (id(raw_eco_stop_status).state >= 128);
+
+# --- ÉTAT ---
+text_sensor:
+  - platform: micronova
+    stove_state:
+      name: "État du Poêle"
+      id: stove_state
+
+# --- ACTIONS (COMMANDES) ---
+switch:
+  - platform: micronova
+    stove:
+      name: "ON-OFF"
+      id: stove_switch
+
+
+
+number:
+  # Consigne Micronova brute (cachée)
+  - platform: micronova
+    thermostat_temperature:
+      name: "Consigne brute"
+      id: consigne_temp_brut
+      step: 1
+      internal: true
+
+  # Template consigne avec limites
+  - platform: template
+    name: "Température de consigne"
+    id: consigne_temp
+    min_value: 10
+    max_value: 30
+    step: 1
+    unit_of_measurement: "°C"
+    device_class: temperature
+    set_action:
+      - lambda: |-
+          auto call = id(consigne_temp_brut).make_call();
+          call.set_value(x);
+          call.perform();
+    lambda: |-
+      return id(consigne_temp_brut).state;
+    update_interval: 30s
+
+  # Power level brut (caché)
+  - platform: micronova
+    power_level:
+      name: "Power level brut"
+      id: power_level_control
+      max_value: 6
+      internal: true
+
+
+
+  # Slider puissance consigne
+  - platform: template
+    name: "Puissance de consigne"
+    id: puissance_consigne
+    min_value: 1
+    max_value: 5
+    step: 1
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == 1;'
+          then:
+            - button.press: puissance_consigne_p1
+      - if:
+          condition:
+            lambda: 'return x == 2;'
+          then:
+            - button.press: puissance_consigne_p2
+      - if:
+          condition:
+            lambda: 'return x == 3;'
+          then:
+            - button.press: puissance_consigne_p3
+      - if:
+          condition:
+            lambda: 'return x == 4;'
+          then:
+            - button.press: puissance_consigne_p4
+      - if:
+          condition:
+            lambda: 'return x == 5;'
+          then:
+            - button.press: puissance_consigne_p5
+    lambda: |-
+      return id(puissance_consigne_lecture).state;
+    update_interval: 30s
+
+
+select:
+  # Mode ventilation (select)
+  - platform: template
+    name: "Mode Ventilation"
+    id: mode_ventilation
+    options:
+      - "Vitesse 1"
+      - "Vitesse 2"
+      - "Vitesse 3"
+      - "Vitesse 4"
+      - "Vitesse 5"
+      - "Auto"
+    restore_value: true
+    optimistic: true
+    set_action:
+      - lambda: |-
+          int value = 0;
+          if (x == "Vitesse 1") value = 1;
+          else if (x == "Vitesse 2") value = 2;
+          else if (x == "Vitesse 3") value = 3;
+          else if (x == "Vitesse 4") value = 4;
+          else if (x == "Vitesse 5") value = 5;
+          else if (x == "Auto") value = 6;
+          
+          auto call = id(power_level_control).make_call();
+          call.set_value(value);
+          call.perform();
+
+
+button:
+  # Boutons cachés
+  - platform: micronova
+    custom_button:
+      id: puissance_consigne_p1
+      name: "Puissance Consigne P1"
+      memory_location: 0xA0
+      memory_address: 0x7E
+      memory_data: 0x01
+      internal: true
+  
+  - platform: micronova
+    custom_button:
+      id: puissance_consigne_p2
+      name: "Puissance Consigne P2"
+      memory_location: 0xA0
+      memory_address: 0x7E
+      memory_data: 0x02
+      internal: true
+  
+  - platform: micronova
+    custom_button:
+      id: puissance_consigne_p3
+      name: "Puissance Consigne P3"
+      memory_location: 0xA0
+      memory_address: 0x7E
+      memory_data: 0x03
+      internal: true
+  
+  - platform: micronova
+    custom_button:
+      id: puissance_consigne_p4
+      name: "Puissance Consigne P4"
+      memory_location: 0xA0
+      memory_address: 0x7E
+      memory_data: 0x04
+      internal: true
+  
+  - platform: micronova
+    custom_button:
+      id: puissance_consigne_p5
+      name: "Puissance Consigne P5"
+      memory_location: 0xA0
+      memory_address: 0x7E
+      memory_data: 0x05
+      internal: true
